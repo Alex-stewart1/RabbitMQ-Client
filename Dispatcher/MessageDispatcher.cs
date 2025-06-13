@@ -1,8 +1,8 @@
 ﻿using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
-using RabbitMQ_Client.Interfaces;
+using RabbitMQClient.Interfaces;
 
-namespace RabbitMQ_Client.Dispatcher;
+namespace RabbitMQClient.Dispatcher;
 
 internal sealed class MessageDispatcher(IServiceScopeFactory serviceScopeFactory)
 {

@@ -1,15 +1,15 @@
 ﻿using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
-using RabbitMQ_Client.Dispatcher;
-using RabbitMQ_Client.Exceptions;
-using RabbitMQ_Client.Interfaces;
-using RabbitMQ_Client.Options;
-using RabbitMQ_Client.Pooling;
+using RabbitMQClient.Dispatcher;
+using RabbitMQClient.Exceptions;
+using RabbitMQClient.Interfaces;
+using RabbitMQClient.Options;
+using RabbitMQClient.Pooling;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
-namespace RabbitMQ_Client;
+namespace RabbitMQClient;
 
 public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory scopeFactory) : IMessageSender, IDisposable, IAsyncDisposable
 {
@@ -21,6 +21,7 @@ public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory
 
     private IConnection _connection = null!;
     private ChannelPool _channelPool = null!;
+    private IChannel _consumerChannel = null!;
 
     internal async ValueTask InitializeAsync()
     {
@@ -32,27 +33,23 @@ public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory
     
     private async ValueTask InitializeQueuesAsync()
     {
-        var channel = await _channelPool.RentAsync();
+        _consumerChannel = await _channelPool.RentAsync();
         
         try
         {
             foreach (var queue in _queues)
             {
-                await channel.QueueDeclareAsync(queue: queue, durable: true, exclusive: false, autoDelete: false, arguments: null);
-                await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false);
+                await _consumerChannel.QueueDeclareAsync(queue: queue, durable: true, exclusive: false, autoDelete: false, arguments: null);
+                await _consumerChannel.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false);
                 
-                var consumer = new AsyncEventingBasicConsumer(channel);
+                var consumer = new AsyncEventingBasicConsumer(_consumerChannel);
                 consumer.ReceivedAsync += ConsumerOnReceivedAsync;
-                await channel.BasicConsumeAsync(queue: queue, autoAck: false, consumer: consumer);
+                await _consumerChannel.BasicConsumeAsync(queue: queue, autoAck: false, consumer: consumer);
             }
         }
         catch (Exception ex)
         {
             //TODO: Log
-        }
-        finally
-        {
-            _channelPool.Return(channel);
         }
     }
 
@@ -131,12 +128,14 @@ public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory
 
     public void Dispose()
     {
+        _channelPool.Return(_consumerChannel);
         _channelPool.Dispose();
         _connection.Dispose();
     }
 
     public async ValueTask DisposeAsync()
     {
+        _channelPool.Return(_consumerChannel);
         await _channelPool.DisposeAsync();
         await _connection.DisposeAsync();
     }

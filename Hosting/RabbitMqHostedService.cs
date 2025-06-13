@@ -1,8 +1,8 @@
 ﻿using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using RabbitMQ_Client.Interfaces;
+using RabbitMQClient.Interfaces;
 
-namespace RabbitMQ_Client.Hosting;
+namespace RabbitMQClient.Hosting;
 
 internal sealed class RabbitMqHostedService(RabbitMqClient rabbitMqClient) : IHostedService, IDisposable, IAsyncDisposable
 {

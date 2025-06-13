@@ -1,23 +1,30 @@
-﻿using RabbitMQ_Client.Exceptions;
-using RabbitMQ_Client.Interfaces;
+﻿using RabbitMQClient.Exceptions;
+using RabbitMQClient.Interfaces;
 using RabbitMQ.Client;
 
-namespace RabbitMQ_Client.Options;
+namespace RabbitMQClient.Options;
 
-public class RabbitMqOptions : IRabbitMqConfiguration
+public class RabbitMqOptions : IRabbitMqConfiguration, IRabbitMqQueueConfiguration 
 {
     internal IConnectionFactory ConnectionFactory = null!;
     internal readonly List<string> Queues = [];
     internal readonly Dictionary<Type, string> MessageTypeQueueNames = [];
+    
+    private string _queueName = null!;
 
     public IRabbitMqConfiguration ConfigureConnection(IConnectionFactory connectionFactory)
     {
+        if (ConnectionFactory != null)
+        {
+            throw new DuplicateRegistrationException("The connection factory has already been configured.");       
+        }
+        
         ConnectionFactory = connectionFactory;
 
         return this;
     }
 
-    public IRabbitMqConfiguration RegisterQueue(string queueName)
+    public IRabbitMqQueueConfiguration RegisterQueue(string queueName)
     {
         if (Queues.Contains(queueName))
         {
@@ -26,10 +33,12 @@ public class RabbitMqOptions : IRabbitMqConfiguration
 
         Queues.Add(queueName);
         
+        _queueName = queueName;
+        
         return this;
     }
     
-    public IRabbitMqConfiguration RegisterMessage<TMessage>(string queueName) where TMessage : IMessage
+    public IRabbitMqQueueConfiguration RegisterMessage<TMessage>() where TMessage : IMessage
     {
         var type = typeof(TMessage);
         
@@ -39,8 +48,13 @@ public class RabbitMqOptions : IRabbitMqConfiguration
                 $"Cannot register message type '{type}' because its FullName is null. " +
                 "This typically occurs with generic type parameters, array types, pointer types, or byref types.");
         }
+
+        if (_queueName is null)
+        {
+            throw new InvalidOperationException($"Cannot register message type '{type}' because no queue has been registered.");
+        }
         
-        if (!MessageTypeQueueNames.TryAdd(type, queueName))
+        if (!MessageTypeQueueNames.TryAdd(type, _queueName))
         {
             throw new DuplicateRegistrationException($"The message type '{type.Name}' is already registered.");
         }
@@ -52,6 +66,10 @@ public class RabbitMqOptions : IRabbitMqConfiguration
 public interface IRabbitMqConfiguration
 {
     IRabbitMqConfiguration ConfigureConnection(IConnectionFactory connectionFactory);
-    IRabbitMqConfiguration RegisterQueue(string queueName);
-    IRabbitMqConfiguration RegisterMessage<TMessage>(string queueName) where TMessage : IMessage;
+    IRabbitMqQueueConfiguration RegisterQueue(string queueName);
+}
+
+public interface IRabbitMqQueueConfiguration
+{
+    IRabbitMqQueueConfiguration RegisterMessage<TMessage>() where TMessage : IMessage;
 }

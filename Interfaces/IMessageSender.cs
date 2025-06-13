@@ -1,4 +1,4 @@
-﻿namespace RabbitMQ_Client.Interfaces;
+﻿namespace RabbitMQClient.Interfaces;
 
 public interface IMessageSender
 {

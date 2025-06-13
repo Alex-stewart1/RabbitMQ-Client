@@ -1,4 +1,4 @@
-﻿namespace RabbitMQ_Client.Interfaces;
+﻿namespace RabbitMQClient.Interfaces;
 
 /// <summary>
 /// Marker interface

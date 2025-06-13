@@ -1,7 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using RabbitMQ.Client;
 
-namespace RabbitMQ_Client.Pooling;
+namespace RabbitMQClient.Pooling;
 
 internal sealed class ChannelPool(IConnection connection) : IDisposable, IAsyncDisposable
 {
@@ -29,12 +29,16 @@ internal sealed class ChannelPool(IConnection connection) : IDisposable, IAsyncD
             channel.Dispose();
         }
 
-        return await _connection.CreateChannelAsync();
+        var newChannel = await _connection.CreateChannelAsync();
+        return newChannel;
     }
 
-    public void Return(IChannel channel)
+    public void Return(IChannel? channel)
     {
-        ArgumentNullException.ThrowIfNull(channel);
+        if (channel is null)
+        {
+            return;
+        }
         
         // Fast path - no locking needed
         if (_disposed || !channel.IsOpen || _channels.Count >= PoolSize) 
@@ -80,6 +84,6 @@ internal sealed class ChannelPool(IConnection connection) : IDisposable, IAsyncD
         while (_channels.TryDequeue(out var channel))
         {
            await channel.DisposeAsync();
-        }       
+        }
     }
 }

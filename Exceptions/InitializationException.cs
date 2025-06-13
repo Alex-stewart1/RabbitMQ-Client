@@ -1,4 +1,4 @@
-﻿namespace RabbitMQ_Client.Exceptions;
+﻿namespace RabbitMQClient.Exceptions;
 
 public class InitializationException : InvalidOperationException
 {
