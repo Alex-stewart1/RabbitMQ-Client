@@ -1,5 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using RabbitMQ_Client.Dispatcher;
 using RabbitMQ_Client.Exceptions;
 using RabbitMQ_Client.Interfaces;
 using RabbitMQ_Client.Options;
@@ -9,19 +11,21 @@ using RabbitMQ.Client.Events;
 
 namespace RabbitMQ_Client;
 
-public class RabbitMqClient(RabbitMqOptions options)
+public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory scopeFactory) : IMessageSender, IDisposable, IAsyncDisposable
 {
     private readonly IConnectionFactory _connectionFactory = options.ConnectionFactory;
+    private readonly MessageDispatcher _messageDispatcher = new(scopeFactory);
     private readonly IReadOnlyList<string> _queues = options.Queues.AsReadOnly();
     private readonly Dictionary<string, Type> _messageTypes = options.MessageTypeQueueNames.Keys.ToDictionary(x => x.FullName!, x => x);
     private readonly Dictionary<Type, string> _messageQueues = options.MessageTypeQueueNames.ToDictionary(x => x.Key, x => x.Value);
 
+    private IConnection _connection = null!;
     private ChannelPool _channelPool = null!;
 
-    public async ValueTask InitializeAsync()
+    internal async ValueTask InitializeAsync()
     {
-        var connection = await _connectionFactory.CreateConnectionAsync();
-        _channelPool = new ChannelPool(connection);
+        _connection = await _connectionFactory.CreateConnectionAsync();
+        _channelPool = new ChannelPool(_connection);
         
         await InitializeQueuesAsync();
     }
@@ -68,10 +72,7 @@ public class RabbitMqClient(RabbitMqOptions options)
             if (_messageTypes.TryGetValue(type, out var messageType))
             {
                 var message = (IMessage)JsonSerializer.Deserialize(@event.Body.Span, messageType)!;
-                
-                // -- Dispatch message --
-                
-                
+                await _messageDispatcher.DispatchAsync(message);
                 await channel.BasicAckAsync(@event.DeliveryTag, false);
 
                 return;
@@ -91,9 +92,15 @@ public class RabbitMqClient(RabbitMqOptions options)
         await channel.BasicRejectAsync(@event.DeliveryTag, requeue: false);
     }
 
-    public async ValueTask PublishDirectlyAsync<TMessage>(TMessage message) where TMessage : IMessage
+    public async Task PublishAsync<TMessage>(TMessage message, CancellationToken token = default) where TMessage : IMessage
     {
         ArgumentNullException.ThrowIfNull(message);
+
+        if (_connection is null || _channelPool is null)
+        {
+            throw new InitializationException(
+                $"{nameof(RabbitMqClient)} has not been initialized. Call {nameof(InitializeAsync)} before calling {nameof(PublishAsync)}");
+        }
         
         var type = typeof(TMessage);
 
@@ -113,11 +120,24 @@ public class RabbitMqClient(RabbitMqOptions options)
                 routingKey: queue,
                 mandatory: true,
                 basicProperties: new BasicProperties { Type = type.FullName!, Persistent = true },
-                body: body);
+                body: body, 
+                cancellationToken: token);
         }
         finally
         {
             _channelPool.Return(channel);
         }
+    }
+
+    public void Dispose()
+    {
+        _channelPool.Dispose();
+        _connection.Dispose();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _channelPool.DisposeAsync();
+        await _connection.DisposeAsync();
     }
 }

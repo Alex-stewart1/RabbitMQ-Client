@@ -4,29 +4,27 @@ using RabbitMQ_Client.Interfaces;
 
 namespace RabbitMQ_Client.Hosting;
 
-internal sealed class RabbitMqHostedService(RabbitMqMessageBusQueue messageBusQueue, RabbitMqClient rabbitMqClient, ILogger<RabbitMqHostedService> logger) : BackgroundService
+internal sealed class RabbitMqHostedService(RabbitMqClient rabbitMqClient) : IHostedService, IDisposable, IAsyncDisposable
 {
-    private readonly RabbitMqMessageBusQueue _messageBusQueue = messageBusQueue;
     private readonly RabbitMqClient _rabbitMqClient = rabbitMqClient;
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
-        // -- Initialize --
         await _rabbitMqClient.InitializeAsync();
-        
-        // -- Handle message publishing --
-        while (await _messageBusQueue.ChannelReader.WaitToReadAsync(stoppingToken))
-        {
-            try
-            {
-                var message = await _messageBusQueue.ChannelReader.ReadAsync(stoppingToken);
+    }
+    
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        return Task.CompletedTask;
+    }
+    
+    public void Dispose()
+    {
+        _rabbitMqClient.Dispose();
+    }
 
-                await _rabbitMqClient.PublishDirectlyAsync(message);
-            }
-            catch (Exception ex)
-            {
-                //TODO: logg
-            }
-        }
+    public async ValueTask DisposeAsync()
+    {
+        await _rabbitMqClient.DisposeAsync();
     }
 }
