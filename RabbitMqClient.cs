@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using RabbitMQClient.Dispatcher;
 using RabbitMQClient.Exceptions;
 using RabbitMQClient.Interfaces;
@@ -11,13 +12,15 @@ using RabbitMQ.Client.Events;
 
 namespace RabbitMQClient;
 
-public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory scopeFactory) : IMessageSender, IDisposable, IAsyncDisposable
+public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory scopeFactory, ILogger<RabbitMqClient>? logger = null) : IMessageSender, IDisposable, IAsyncDisposable
 {
     private readonly IConnectionFactory _connectionFactory = options.ConnectionFactory;
     private readonly MessageDispatcher _messageDispatcher = new(scopeFactory);
-    private readonly IReadOnlyList<string> _queues = options.Queues.AsReadOnly();
-    private readonly Dictionary<string, Type> _messageTypes = options.MessageTypeQueueNames.Keys.ToDictionary(x => x.FullName!, x => x);
-    private readonly Dictionary<Type, string> _messageQueues = options.MessageTypeQueueNames.ToDictionary(x => x.Key, x => x.Value);
+    private readonly ILogger<RabbitMqClient>? _logger = logger;
+    private readonly IReadOnlyList<QueueOptions> _queues = options.Queues.AsReadOnly();
+    private readonly IReadOnlyList<ExchangeOptions> _exchanges = options.Exchanges.AsReadOnly();
+    private readonly Dictionary<string, Type> _messageTypes = options.MessageTypes.Keys.ToDictionary(x => x.FullName!, x => x);
+    private readonly Dictionary<Type, MessageOptions> _messageQueues = options.MessageTypes.ToDictionary(x => x.Key, x => x.Value);
 
     private IConnection _connection = null!;
     private ChannelPool _channelPool = null!;
@@ -28,28 +31,100 @@ public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory
         _connection = await _connectionFactory.CreateConnectionAsync();
         _channelPool = new ChannelPool(_connection);
         
-        await InitializeQueuesAsync();
-    }
-    
-    private async ValueTask InitializeQueuesAsync()
-    {
         _consumerChannel = await _channelPool.RentAsync();
+        _consumerChannel.ChannelShutdownAsync += OnConsumerChannelShutdown;
         
+        await InitializeExchangesAsync(_consumerChannel);
+        await InitializeQueuesAsync(_consumerChannel);
+    }
+
+    private async Task InitializeExchangesAsync(IChannel channel)
+    {
         try
         {
-            foreach (var queue in _queues)
+            foreach (var exchange in _exchanges)
             {
-                await _consumerChannel.QueueDeclareAsync(queue: queue, durable: true, exclusive: false, autoDelete: false, arguments: null);
-                await _consumerChannel.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false);
+                _logger?.LogDebug("Declaring exchange {ExchangeName} of type {ExchangeType}", 
+                    exchange.ExchangeName, exchange.ExchangeType);
                 
-                var consumer = new AsyncEventingBasicConsumer(_consumerChannel);
-                consumer.ReceivedAsync += ConsumerOnReceivedAsync;
-                await _consumerChannel.BasicConsumeAsync(queue: queue, autoAck: false, consumer: consumer);
+                await channel.ExchangeDeclareAsync(
+                      exchange: exchange.ExchangeName,
+                      type: exchange.ExchangeType,
+                      durable: exchange.Durable,
+                      autoDelete: exchange.AutoDelete);
+                
+                _logger?.LogInformation("Successfully declared exchange {ExchangeName}", exchange.ExchangeName);
             }
         }
         catch (Exception ex)
         {
-            //TODO: Log
+            _logger?.LogError(ex, "Failed to initialize exchanges");
+            throw;
+        }
+    }
+
+    private async Task InitializeQueuesAsync(IChannel channel)
+    {
+        try
+        {
+            await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false);
+            
+            foreach (var queue in _queues)
+            {
+                _logger?.LogDebug("Declaring queue {QueueName} and binding to exchange {ExchangeName}", 
+                    queue.QueueName, queue.ExchangeName);
+                
+                await channel.QueueDeclareAsync(
+                    queue: queue.QueueName,
+                    durable: queue.Durable,
+                    exclusive: queue.Exclusive,
+                    autoDelete: queue.AutoDelete
+                );
+                
+                await channel.QueueBindAsync(queue.QueueName, queue.ExchangeName, "");
+                
+                var consumer = new AsyncEventingBasicConsumer(_consumerChannel);
+                consumer.ReceivedAsync += ConsumerOnReceivedAsync;
+                await channel.BasicConsumeAsync(queue: queue.QueueName, autoAck: false, consumer: consumer);
+                
+                _logger?.LogInformation("Successfully configured queue {QueueName} with consumer", queue.QueueName);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to initialize queues");
+            throw;
+        } 
+    }
+    
+    private async Task OnConsumerChannelShutdown(object sender, ShutdownEventArgs @event)
+    {
+        if (@event.Initiator == ShutdownInitiator.Application)
+        {
+            _logger?.LogDebug("Consumer channel shutdown initiated by application");
+            return;
+        }
+    
+        _logger?.LogWarning("Consumer channel shutdown detected. Reason: {ReplyText}, Code: {ReplyCode}", 
+            @event.ReplyText, @event.ReplyCode);
+    
+        try
+        {
+            _consumerChannel.ChannelShutdownAsync -= OnConsumerChannelShutdown;
+            _channelPool.Return(_consumerChannel);
+            
+            _consumerChannel = await _channelPool.RentAsync();
+            _consumerChannel.ChannelShutdownAsync += OnConsumerChannelShutdown;
+            
+            await InitializeExchangesAsync(_consumerChannel);
+            await InitializeQueuesAsync(_consumerChannel);
+            
+            _logger?.LogInformation("Successfully recovered consumer channel after shutdown");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to recover consumer channel after shutdown");
+            throw;
         }
     }
 
@@ -62,26 +137,34 @@ public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory
             var type = @event.BasicProperties.Type;
             if (type is null)
             {
-                //TODO: log
+                _logger?.LogWarning("Received message without type property. DeliveryTag: {DeliveryTag}, Exchange: {Exchange}, RoutingKey: {RoutingKey}", 
+                    @event.DeliveryTag, @event.Exchange, @event.RoutingKey);
                 return;
             }
             
             if (_messageTypes.TryGetValue(type, out var messageType))
             {
+                _logger?.LogDebug("Processing message of type {MessageType}, DeliveryTag: {DeliveryTag}", 
+                    type, @event.DeliveryTag);
+                
                 var message = (IMessage)JsonSerializer.Deserialize(@event.Body.Span, messageType)!;
                 await _messageDispatcher.DispatchAsync(message);
                 await channel.BasicAckAsync(@event.DeliveryTag, false);
 
+                _logger?.LogDebug("Successfully processed message of type {MessageType}, DeliveryTag: {DeliveryTag}", 
+                    type, @event.DeliveryTag);
                 return;
             }
             else
             {
-                //TODO: Log missing type and add dead letter
+                _logger?.LogError("Unknown message type {MessageType}. DeliveryTag: {DeliveryTag}, Exchange: {Exchange}, RoutingKey: {RoutingKey}. Message will be rejected and moved to dead letter queue if configured.", 
+                    type, @event.DeliveryTag, @event.Exchange, @event.RoutingKey);
             }
         }
         catch (Exception ex)
         {
-            //TODO: Log missing type and add dead letter
+            _logger?.LogError(ex, "Failed to process message of type {MessageType}, DeliveryTag: {DeliveryTag}. Message will be rejected and moved to dead letter queue if configured.", 
+                @event.BasicProperties.Type, @event.DeliveryTag);
             Debugger.Break();
         }
         
@@ -101,7 +184,7 @@ public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory
         
         var type = typeof(TMessage);
 
-        if (!_messageQueues.TryGetValue(type, out var queue))
+        if (!_messageQueues.TryGetValue(type, out var messageOptions))
         {
             throw new UnknownQueueException($"{type.Name} has not been registered.");
         }
@@ -112,13 +195,20 @@ public sealed class RabbitMqClient(RabbitMqOptions options, IServiceScopeFactory
 
         try
         {
+            _logger?.LogDebug("Publishing message of type {MessageType} to exchange {ExchangeName} with routing key {RoutingKey}", 
+                type.Name, messageOptions.ExchangeName, messageOptions.RoutingKey);
+            
+            var basicProperties = new BasicProperties { Type = type.FullName!, Persistent = messageOptions.Persistent };
+            
             await channel.BasicPublishAsync(
-                exchange: "",
-                routingKey: queue,
-                mandatory: true,
-                basicProperties: new BasicProperties { Type = type.FullName!, Persistent = true },
+                exchange: messageOptions.ExchangeName,
+                routingKey: messageOptions.RoutingKey,
+                mandatory: messageOptions.Mandatory,
+                basicProperties: basicProperties,
                 body: body, 
                 cancellationToken: token);
+            
+            _logger?.LogDebug("Successfully published message of type {MessageType}", type.Name);
         }
         finally
         {

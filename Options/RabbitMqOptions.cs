@@ -4,14 +4,12 @@ using RabbitMQ.Client;
 
 namespace RabbitMQClient.Options;
 
-public class RabbitMqOptions : IRabbitMqConfiguration, IRabbitMqQueueConfiguration 
+public class RabbitMqOptions : IRabbitMqConfiguration
 {
     internal IConnectionFactory ConnectionFactory = null!;
-    internal readonly List<string> Queues = [];
-    internal readonly Dictionary<Type, string> MessageTypeQueueNames = [];
-    
-    private string _queueName = null!;
-
+    internal readonly List<QueueOptions> Queues = [];
+    internal readonly List<ExchangeOptions> Exchanges = [];
+    internal readonly Dictionary<Type, MessageOptions> MessageTypes = [];
     public IRabbitMqConfiguration ConfigureConnection(IConnectionFactory connectionFactory)
     {
         if (ConnectionFactory != null)
@@ -24,21 +22,32 @@ public class RabbitMqOptions : IRabbitMqConfiguration, IRabbitMqQueueConfigurati
         return this;
     }
 
-    public IRabbitMqQueueConfiguration RegisterQueue(string queueName)
+    public IRabbitMqConfiguration RegisterExchange(ExchangeOptions options)
     {
-        if (Queues.Contains(queueName))
+        if (Exchanges.Any(x => x.ExchangeName == options.ExchangeName))
         {
-            throw new DuplicateRegistrationException($"The queue '{queueName}' is already registered.");
+            throw new DuplicateRegistrationException($"The exchange '{options.ExchangeName}' is already registered.");
+        }
+        
+        Exchanges.Add(options);
+        
+        return this;       
+    }
+
+    
+    public IRabbitMqConfiguration RegisterQueue(QueueOptions options)
+    {
+        if (Queues.Any(x => x.QueueName == options.QueueName && x.ExchangeName == options.ExchangeName))
+        {
+            throw new DuplicateRegistrationException($"The queue '{options.QueueName}' is already registered with the exchange '{options.ExchangeName}'.");
         }
 
-        Queues.Add(queueName);
-        
-        _queueName = queueName;
+        Queues.Add(options);
         
         return this;
     }
     
-    public IRabbitMqQueueConfiguration RegisterMessage<TMessage>() where TMessage : IMessage
+    public IRabbitMqConfiguration RegisterMessage<TMessage>(MessageOptions options) where TMessage : IMessage
     {
         var type = typeof(TMessage);
         
@@ -49,12 +58,7 @@ public class RabbitMqOptions : IRabbitMqConfiguration, IRabbitMqQueueConfigurati
                 "This typically occurs with generic type parameters, array types, pointer types, or byref types.");
         }
 
-        if (_queueName is null)
-        {
-            throw new InvalidOperationException($"Cannot register message type '{type}' because no queue has been registered.");
-        }
-        
-        if (!MessageTypeQueueNames.TryAdd(type, _queueName))
+        if (!MessageTypes.TryAdd(type, options))
         {
             throw new DuplicateRegistrationException($"The message type '{type.Name}' is already registered.");
         }
@@ -66,10 +70,7 @@ public class RabbitMqOptions : IRabbitMqConfiguration, IRabbitMqQueueConfigurati
 public interface IRabbitMqConfiguration
 {
     IRabbitMqConfiguration ConfigureConnection(IConnectionFactory connectionFactory);
-    IRabbitMqQueueConfiguration RegisterQueue(string queueName);
-}
-
-public interface IRabbitMqQueueConfiguration
-{
-    IRabbitMqQueueConfiguration RegisterMessage<TMessage>() where TMessage : IMessage;
+    IRabbitMqConfiguration RegisterExchange(ExchangeOptions options);
+    IRabbitMqConfiguration RegisterQueue(QueueOptions options);
+    IRabbitMqConfiguration RegisterMessage<TMessage>(MessageOptions options) where TMessage : IMessage;
 }
